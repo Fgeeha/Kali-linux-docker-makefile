@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Параметры (можно задавать через env)
+# Параметры (можно задавать через env или через make)
 TARGET="${TARGET:-}"
 REPORT_DIR="${REPORT_DIR:-/zap/reports}"
-ZAP_BASELINE="${ZAP_BASELINE:-/zap/zap-baseline.py}"
-ZAP_FULL="${ZAP_FULL:-/zap/zap-full-scan.py}"
+ZAP_SCRIPTS_DIR="${ZAP_SCRIPTS_DIR:-/opt/zap-scripts}"
+ZAP_CMD="${ZAP_CMD:-/usr/bin/zaproxy}"
 SQLMAP_OPTS="${SQLMAP_OPTS:-}"   # дополнительные опции для sqlmap
 SQLMAP_DATA="${SQLMAP_DATA:-}"   # data for POST (если нужен)
+SQLMAP="${SQLMAP:-false}"        # включение sqlmap
 
 if [ -z "$TARGET" ]; then
   echo "ERROR: TARGET is empty. Set TARGET=http://example.com"
@@ -16,49 +17,64 @@ fi
 
 mkdir -p "$REPORT_DIR"
 
-timestamp() {
-  date +%Y%m%d_%H%M%S
-}
+timestamp() { date +%Y%m%d_%H%M%S; }
 
 echo "[*] Target: $TARGET"
 echo "[*] Reports folder: $REPORT_DIR"
 
-# 1) OWASP ZAP baseline (быстрый)
+# ---- 1) ZAP baseline (headless) ----
 BASELINE_HTML="$REPORT_DIR/zap_baseline_$(timestamp).html"
-echo "[*] Running ZAP baseline..."
-python3 "$ZAP_BASELINE" -t "$TARGET" -r "$BASELINE_HTML" -d || echo "[!] ZAP baseline exited with non-zero code"
+if [ -x "$ZAP_SCRIPTS_DIR/zap-baseline.py" ]; then
+  echo "[*] Running ZAP baseline script..."
+  # Запускаем ZAP в фоновом режиме (daemon), затем запускаем скрипт.
+  $ZAP_CMD -daemon -host 127.0.0.1 -port 8090 -config api.disablekey=true >/dev/null 2>&1 || true
+  sleep 3
+  python3 "$ZAP_SCRIPTS_DIR/zap-baseline.py" -t "$TARGET" -r "$BASELINE_HTML" -d || echo "[!] ZAP baseline exited non-zero"
+  # Попытаемся корректно остановить ZAP
+  pkill -f zaproxy || true
+else
+  echo "[!] zap-baseline.py not found in $ZAP_SCRIPTS_DIR — skipping ZAP baseline."
+fi
 
-# 2) OWASP ZAP full (долго, опционально)
+# ---- 2) ZAP full scan (optionally long) ----
 FULL_HTML="$REPORT_DIR/zap_full_$(timestamp).html"
-echo "[*] Running ZAP full scan (this can take long)..."
-python3 "$ZAP_FULL" -t "$TARGET" -r "$FULL_HTML" -d || echo "[!] ZAP full scan exited with non-zero code"
+if [ -x "$ZAP_SCRIPTS_DIR/zap-full-scan.py" ]; then
+  echo "[*] Running ZAP full-scan script (this may take long)..."
+  $ZAP_CMD -daemon -host 127.0.0.1 -port 8090 -config api.disablekey=true >/dev/null 2>&1 || true
+  sleep 5
+  python3 "$ZAP_SCRIPTS_DIR/zap-full-scan.py" -t "$TARGET" -r "$FULL_HTML" -d || echo "[!] ZAP full scan exited non-zero"
+  pkill -f zaproxy || true
+else
+  echo "[!] zap-full-scan.py not found in $ZAP_SCRIPTS_DIR — skipping ZAP full scan."
+fi
 
-# 3) Nikto
+# ---- 3) Nikto ----
 NIKTO_HTML="$REPORT_DIR/nikto_$(timestamp).html"
-echo "[*] Running Nikto ..."
-nikto -h "$TARGET" -o "$NIKTO_HTML" -Format html || echo "[!] Nikto exited with non-zero code"
+echo "[*] Running Nikto..."
+nikto -h "$TARGET" -o "$NIKTO_HTML" -Format html || echo "[!] Nikto exited non-zero"
 
-# 4) Nmap: быстрое сканирование версий (top ports)
-echo "[*] Running Nmap ..."
+# ---- 4) Nmap ----
+echo "[*] Running Nmap (top ports)..."
 NMAP_PREFIX="$REPORT_DIR/nmap_$(timestamp)"
-nmap -sS -sV -Pn --top-ports 1000 -oA "$NMAP_PREFIX" "$TARGET" || echo "[!] Nmap exited with non-zero code"
+# Если TARGET — домен или IP, используем как есть. Если URL — извлечём хост:
+NMAP_TARGET="$TARGET"
+# попытка удалить схему
+NMAP_TARGET="$(echo "$NMAP_TARGET" | sed -E 's#^https?://##' | sed -E 's#/.*$//')"
+nmap -sS -sV -Pn --top-ports 1000 -oA "$NMAP_PREFIX" "$NMAP_TARGET" || echo "[!] Nmap exited non-zero"
 
-# 5) sqlmap (опционально, только если указано SQLMAP=true)
-# Для sqlmap нужно правило: явно включай его через переменную SQLMAP=true в make или env.
-if [ "${SQLMAP:-false}" = "true" ]; then
-  echo "[*] Running sqlmap (interactive/autonomous) ..."
+# ---- 5) sqlmap (опционально) ----
+if [ "$SQLMAP" = "true" ]; then
+  echo "[*] Running sqlmap..."
   SQLMAP_OUTDIR="$REPORT_DIR/sqlmap_$(timestamp)"
   mkdir -p "$SQLMAP_OUTDIR"
-  # Если передали POST data в SQLMAP_DATA — используем -p --data
   if [ -n "$SQLMAP_DATA" ]; then
-    sqlmap -u "$TARGET" --data "$SQLMAP_DATA" --batch --output-dir="$SQLMAP_OUTDIR" $SQLMAP_OPTS || echo "[!] sqlmap exited with non-zero code"
+    sqlmap -u "$TARGET" --data "$SQLMAP_DATA" --batch --output-dir="$SQLMAP_OUTDIR" $SQLMAP_OPTS || echo "[!] sqlmap exited non-zero"
   else
-    # Попробуем автоматический тест параметров в URL
-    sqlmap -u "$TARGET" --batch --output-dir="$SQLMAP_OUTDIR" $SQLMAP_OPTS || echo "[!] sqlmap exited with non-zero code"
+    sqlmap -u "$TARGET" --batch --output-dir="$SQLMAP_OUTDIR" $SQLMAP_OPTS || echo "[!] sqlmap exited non-zero"
   fi
-  echo "[*] sqlmap reports in: $SQLMAP_OUTDIR"
+  echo "[*] sqlmap output in: $SQLMAP_OUTDIR"
 else
-  echo "[*] SQLMAP not enabled (set SQLMAP=true to enable)."
+  echo "[*] sqlmap not enabled (set SQLMAP=true to enable)."
 fi
 
 echo "[*] All scans finished. Reports: $REPORT_DIR"

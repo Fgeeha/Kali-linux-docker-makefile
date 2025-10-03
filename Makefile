@@ -1,15 +1,15 @@
-# Makefile для удобного запуска
-IMAGE_NAME := vuln-scanner
-CONTAINER_NAME := vuln-scanner-run
+IMAGE_NAME := vuln-scanner-kali
+CONTAINER_NAME := vuln-scanner-kali-run
 REPORT_DIR := $(CURDIR)/reports
 TARGET ?= http://127.0.0.1:8080
 
-.PHONY: build run shell zap-baseline zap-full nikto nmap scan sqlmap clean
+.PHONY: build run shell zap-baseline zap-full nikto nmap scan sqlmap scan-all clean
 
 build:
 	docker build -t $(IMAGE_NAME) .
 
 run:
+	mkdir -p $(REPORT_DIR)
 	docker run --rm -it \
 	  --name $(CONTAINER_NAME) \
 	  -e TARGET=$(TARGET) \
@@ -17,19 +17,21 @@ run:
 	  $(IMAGE_NAME)
 
 shell:
+	mkdir -p $(REPORT_DIR)
 	docker run --rm -it \
 	  --name $(CONTAINER_NAME) \
 	  -e TARGET=$(TARGET) \
 	  -v $(REPORT_DIR):/zap/reports \
 	  $(IMAGE_NAME) bash
 
+# Запуск ZAP baseline напрямую (если скрипты скачаны)
 zap-baseline:
 	mkdir -p $(REPORT_DIR)
 	docker run --rm -it \
 	  -e TARGET=$(TARGET) \
 	  -v $(REPORT_DIR):/zap/reports \
 	  $(IMAGE_NAME) \
-	  python3 /zap/zap-baseline.py -t $(TARGET) -r /zap/reports/zap_baseline.html -d
+	  bash -lc "python3 /opt/zap-scripts/zap-baseline.py -t $(TARGET) -r /zap/reports/zap_baseline.html -d || true"
 
 zap-full:
 	mkdir -p $(REPORT_DIR)
@@ -37,7 +39,7 @@ zap-full:
 	  -e TARGET=$(TARGET) \
 	  -v $(REPORT_DIR):/zap/reports \
 	  $(IMAGE_NAME) \
-	  python3 /zap/zap-full-scan.py -t $(TARGET) -r /zap/reports/zap_full.html -d
+	  bash -lc "python3 /opt/zap-scripts/zap-full-scan.py -t $(TARGET) -r /zap/reports/zap_full.html -d || true"
 
 nikto:
 	mkdir -p $(REPORT_DIR)
@@ -53,10 +55,8 @@ nmap:
 	  -e TARGET=$(TARGET) \
 	  -v $(REPORT_DIR):/zap/reports \
 	  $(IMAGE_NAME) \
-	  bash -lc "nmap -sS -sV -Pn --top-ports 1000 -oA /zap/reports/nmap $(TARGET)"
+	  bash -lc "nmap -sS -sV -Pn --top-ports 1000 -oA /zap/reports/nmap $(shell echo $(TARGET) | sed -E 's#^https?://##' | sed -E 's#/.*$$//')"
 
-# sqlmap: example usage
-# make sqlmap TARGET="http://example.com/page.php?id=1" SQLMAP=true
 sqlmap:
 	@mkdir -p $(REPORT_DIR)
 	@echo "[*] Running sqlmap in container..."
@@ -70,7 +70,6 @@ sqlmap:
 	  $(IMAGE_NAME) \
 	  /usr/local/bin/scan.sh
 
-# Полный набор (baseline + full + nikto + nmap; sqlmap off by default)
 scan: build
 	mkdir -p $(REPORT_DIR)
 	docker run --rm -it \
@@ -80,7 +79,7 @@ scan: build
 	  $(IMAGE_NAME) \
 	  /usr/local/bin/scan.sh
 
-# Полный набор + sqlmap
+# Включая sqlmap
 scan-all: build
 	mkdir -p $(REPORT_DIR)
 	docker run --rm -it \
