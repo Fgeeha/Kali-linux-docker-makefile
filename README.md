@@ -33,6 +33,17 @@
 
    Отчёты появятся в `./reports/`.
 
+   Если целевой сервер защищён базовой авторизацией (например, nginx с `auth_basic`),
+   передайте логин и пароль через переменные окружения `BASIC_AUTH_USER` и `BASIC_AUTH_PASS`:
+
+   ```bash
+   make scan TARGET=http://your-target.example.com \
+     BASIC_AUTH_USER=tester BASIC_AUTH_PASS=secret
+   ```
+
+   Указанные значения будут автоматически использованы в ZAP, Nikto и sqlmap.
+   При наличии специальных символов в пароле не забудьте URL-кодировать их.
+
 ## Примеры команд
 
 * Только ZAP baseline:

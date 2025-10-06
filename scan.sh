@@ -3,6 +3,8 @@ set -euo pipefail
 
 # Параметры (можно задавать через env или через make)
 TARGET="${TARGET:-}"
+BASIC_AUTH_USER="${BASIC_AUTH_USER:-}"
+BASIC_AUTH_PASS="${BASIC_AUTH_PASS:-}"
 REPORT_DIR="${REPORT_DIR:-/zap/reports}"
 ZAP_SCRIPTS_DIR="${ZAP_SCRIPTS_DIR:-/opt/zap-scripts}"
 ZAP_CMD="${ZAP_CMD:-/usr/bin/zaproxy}"
@@ -17,9 +19,34 @@ fi
 
 mkdir -p "$REPORT_DIR"
 
+# Формируем URL с учётом Basic Auth, если логин и пароль переданы.
+TARGET_WITH_AUTH="$TARGET"
+if [ -n "$BASIC_AUTH_USER" ] && [ -n "$BASIC_AUTH_PASS" ]; then
+  # Встраиваем user:pass прямо в URL (https://user:pass@host)
+  case "$TARGET" in
+    http://*)
+      TARGET_WITH_AUTH="http://${BASIC_AUTH_USER}:${BASIC_AUTH_PASS}@${TARGET#http://}"
+      ;;
+    https://*)
+      TARGET_WITH_AUTH="https://${BASIC_AUTH_USER}:${BASIC_AUTH_PASS}@${TARGET#https://}"
+      ;;
+    *)
+      echo "[!] BASIC_AUTH_* задан, но TARGET не содержит схему http(s). Использую TARGET как есть."
+      ;;
+  esac
+fi
+
+AUTH_CREDENTIALS=""
+if [ -n "$BASIC_AUTH_USER" ] && [ -n "$BASIC_AUTH_PASS" ]; then
+  AUTH_CREDENTIALS="$BASIC_AUTH_USER:$BASIC_AUTH_PASS"
+fi
+
 timestamp() { date +%Y%m%d_%H%M%S; }
 
 echo "[*] Target: $TARGET"
+if [ -n "$AUTH_CREDENTIALS" ]; then
+  echo "[*] Basic auth credentials supplied for target"
+fi
 echo "[*] Reports folder: $REPORT_DIR"
 
 # ---- 1) ZAP baseline (headless) ----
@@ -29,7 +56,7 @@ if [ -x "$ZAP_SCRIPTS_DIR/zap-baseline.py" ]; then
   # Запускаем ZAP в фоновом режиме (daemon), затем запускаем скрипт.
   $ZAP_CMD -daemon -host 127.0.0.1 -port 8090 -config api.disablekey=true >/dev/null 2>&1 || true
   sleep 3
-  python3 "$ZAP_SCRIPTS_DIR/zap-baseline.py" -t "$TARGET" -r "$BASELINE_HTML" -d || echo "[!] ZAP baseline exited non-zero"
+  python3 "$ZAP_SCRIPTS_DIR/zap-baseline.py" -t "$TARGET_WITH_AUTH" -r "$BASELINE_HTML" -d || echo "[!] ZAP baseline exited non-zero"
   # Попытаемся корректно остановить ZAP
   pkill -f zaproxy || true
 else
@@ -42,7 +69,7 @@ if [ -x "$ZAP_SCRIPTS_DIR/zap-full-scan.py" ]; then
   echo "[*] Running ZAP full-scan script (this may take long)..."
   $ZAP_CMD -daemon -host 127.0.0.1 -port 8090 -config api.disablekey=true >/dev/null 2>&1 || true
   sleep 5
-  python3 "$ZAP_SCRIPTS_DIR/zap-full-scan.py" -t "$TARGET" -r "$FULL_HTML" -d || echo "[!] ZAP full scan exited non-zero"
+  python3 "$ZAP_SCRIPTS_DIR/zap-full-scan.py" -t "$TARGET_WITH_AUTH" -r "$FULL_HTML" -d || echo "[!] ZAP full scan exited non-zero"
   pkill -f zaproxy || true
 else
   echo "[!] zap-full-scan.py not found in $ZAP_SCRIPTS_DIR — skipping ZAP full scan."
@@ -51,7 +78,11 @@ fi
 # ---- 3) Nikto ----
 NIKTO_HTML="$REPORT_DIR/nikto_$(timestamp).html"
 echo "[*] Running Nikto..."
-nikto -h "$TARGET" -o "$NIKTO_HTML" -Format html || echo "[!] Nikto exited non-zero"
+if [ -n "$AUTH_CREDENTIALS" ]; then
+  nikto -h "$TARGET" -o "$NIKTO_HTML" -Format html -id "$AUTH_CREDENTIALS" || echo "[!] Nikto exited non-zero"
+else
+  nikto -h "$TARGET" -o "$NIKTO_HTML" -Format html || echo "[!] Nikto exited non-zero"
+fi
 
 # ---- 4) Nmap ----
 echo "[*] Running Nmap (top ports)..."
@@ -67,10 +98,14 @@ if [ "$SQLMAP" = "true" ]; then
   echo "[*] Running sqlmap..."
   SQLMAP_OUTDIR="$REPORT_DIR/sqlmap_$(timestamp)"
   mkdir -p "$SQLMAP_OUTDIR"
+  SQLMAP_AUTH_OPTS=()
+  if [ -n "$AUTH_CREDENTIALS" ]; then
+    SQLMAP_AUTH_OPTS+=(--auth-type=Basic "--auth-cred=$AUTH_CREDENTIALS")
+  fi
   if [ -n "$SQLMAP_DATA" ]; then
-    sqlmap -u "$TARGET" --data "$SQLMAP_DATA" --batch --output-dir="$SQLMAP_OUTDIR" $SQLMAP_OPTS || echo "[!] sqlmap exited non-zero"
+    sqlmap -u "$TARGET" --data "$SQLMAP_DATA" --batch --output-dir="$SQLMAP_OUTDIR" ${SQLMAP_AUTH_OPTS[@]} $SQLMAP_OPTS || echo "[!] sqlmap exited non-zero"
   else
-    sqlmap -u "$TARGET" --batch --output-dir="$SQLMAP_OUTDIR" $SQLMAP_OPTS || echo "[!] sqlmap exited non-zero"
+    sqlmap -u "$TARGET" --batch --output-dir="$SQLMAP_OUTDIR" ${SQLMAP_AUTH_OPTS[@]} $SQLMAP_OPTS || echo "[!] sqlmap exited non-zero"
   fi
   echo "[*] sqlmap output in: $SQLMAP_OUTDIR"
 else
