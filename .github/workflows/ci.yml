@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [Master]
+  pull_request:
+
+jobs:
+  lint:
+    name: Линтеры
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Версия закреплена: плавающий @master противоречит закреплению
+      # ZAP_REF и версий pip в Dockerfile.
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: '.'
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  test:
+    name: Тесты scan.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Через make, чтобы CI и локальный запуск не разъехались.
+      - name: Прогнать проверки на заглушках
+        run: make test
+
+  build:
+    name: Сборка образа
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Собрать образ
+        run: make build
+
+      - name: Проверить, что скрипты ZAP на месте
+        run: |
+          docker run --rm --entrypoint sh vuln-scanner-kali -c \
+            'test -f /opt/zap-scripts/zap_common.py \
+             && test -f /opt/zap-scripts/zap-baseline.py \
+             && test -f /opt/zap-scripts/zap-full-scan.py \
+             && test -x /zap/zap-x.sh \
+             && python3 -c "import sys; sys.path.insert(0, \"/opt/zap-scripts\"); import zap_common"'
+
+      - name: Проверить обязательность CONFIRM_AUTHORIZED
+        run: |
+          set +e
+          docker run --rm -e TARGET=http://example.com vuln-scanner-kali scan.sh
+          rc=$?
+          set -e
+          test "$rc" -eq 3 || { echo "ожидался выход 3 без CONFIRM_AUTHORIZED, получен $rc"; exit 1; }

@@ -1,0 +1,10 @@
+# Всё, что не нужно в контексте сборки
+.git/
+.github/
+reports/
+work/
+logs/
+*.log
+*.md
+LICENSE
+Makefile

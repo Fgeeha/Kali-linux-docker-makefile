@@ -1,96 +1,104 @@
+.DEFAULT_GOAL := help
+
+.PHONY: help build run scan scan-all baseline zap-baseline full zap-full \
+        nikto nmap sqlmap lint test check shell clean
+
 IMAGE_NAME := vuln-scanner-kali
-CONTAINER_NAME := vuln-scanner-kali-run
 REPORT_DIR := $(CURDIR)/reports
+
 TARGET ?= http://127.0.0.1:8080
 
-.PHONY: build run shell zap-baseline zap-full nikto nmap scan sqlmap scan-all clean
+# Подтверждение прав на сканирование. Без CONFIRM_AUTHORIZED=yes scan.sh
+# откажется работать — это осознанный барьер, а не забытый дефолт.
+CONFIRM_AUTHORIZED ?=
 
-build:
+# Опции инструментов (пробрасываются в контейнер как есть)
+ZAP_OPTS ?=
+NIKTO_OPTS ?=
+NMAP_OPTS ?=
+SQLMAP_OPTS ?=
+SQLMAP_DATA ?=
+
+# -it только при интерактивном запуске, иначе ломается вызов из CI
+TTY := $(shell [ -t 0 ] && echo -it)
+UIDGID := $(shell id -u):$(shell id -g)
+
+# Отчёты пишутся в /zap/wrk: это же base_dir официальных скриптов ZAP.
+# --user не даёт контейнеру оставить root-овые файлы в примонтированном
+# каталоге отчётов на хосте.
+DOCKER_RUN = docker run --rm $(TTY) \
+	  --user $(UIDGID) \
+	  -e TARGET="$(TARGET)" \
+	  -e CONFIRM_AUTHORIZED="$(CONFIRM_AUTHORIZED)" \
+	  -e ZAP_OPTS="$(ZAP_OPTS)" \
+	  -e NIKTO_OPTS="$(NIKTO_OPTS)" \
+	  -e NMAP_OPTS="$(NMAP_OPTS)" \
+	  -e SQLMAP_OPTS="$(SQLMAP_OPTS)" \
+	  -e SQLMAP_DATA="$(SQLMAP_DATA)" \
+	  -v $(REPORT_DIR):/zap/wrk
+
+# Выключает все инструменты разом: одиночные цели ниже включают обратно
+# только свой, чтобы набор флагов не расходился от цели к цели.
+NONE = -e ZAP_BASELINE=false -e ZAP_FULL=false -e NIKTO=false -e NMAP=false -e SQLMAP=false
+
+help: ## Показать список целей
+	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+# --- Сборка ----------------------------------------------------------------
+
+build: ## Собрать образ сканера
 	docker build -t $(IMAGE_NAME) .
 
-run:
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  --name $(CONTAINER_NAME) \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME)
+# --- Сканирование ----------------------------------------------------------
 
-shell:
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  --name $(CONTAINER_NAME) \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) bash
-
-# Запуск ZAP baseline напрямую (если скрипты скачаны)
-zap-baseline:
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  bash -lc "python3 /opt/zap-scripts/zap-baseline.py -t $(TARGET) -r /zap/reports/zap_baseline.html -d || true"
-
-zap-full:
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  bash -lc "python3 /opt/zap-scripts/zap-full-scan.py -t $(TARGET) -r /zap/reports/zap_full.html -d || true"
-
-nikto:
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  nikto -h $(TARGET) -o /zap/reports/nikto.html -Format html
-
-nmap:
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it --cap-add=NET_RAW --cap-add=NET_ADMIN \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  bash -lc "nmap -sS -sV -Pn --top-ports 1000 -oA /zap/reports/nmap $(shell echo $(TARGET) | sed -E 's#^https?://##' | sed -E 's#/.*$$//')"
-
-sqlmap:
+$(REPORT_DIR):
 	@mkdir -p $(REPORT_DIR)
-	@echo "[*] Running sqlmap in container..."
-	docker run --rm -it \
-	  --name $(CONTAINER_NAME)-sqlmap \
-	  -e TARGET=$(TARGET) \
-	  -e SQLMAP=true \
-	  -e SQLMAP_OPTS="$(SQLMAP_OPTS)" \
-	  -e SQLMAP_DATA="$(SQLMAP_DATA)" \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  /usr/local/bin/scan.sh
 
-scan: build
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  --name $(CONTAINER_NAME) \
-	  -e TARGET=$(TARGET) \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  /usr/local/bin/scan.sh
+scan: build | $(REPORT_DIR) ## Полный набор по умолчанию: ZAP baseline + Nikto + Nmap
+	$(DOCKER_RUN) $(IMAGE_NAME) scan.sh
 
-# Включая sqlmap
-scan-all: build
-	mkdir -p $(REPORT_DIR)
-	docker run --rm -it \
-	  --name $(CONTAINER_NAME) \
-	  -e TARGET=$(TARGET) \
-	  -e SQLMAP=true \
-	  -e SQLMAP_OPTS="$(SQLMAP_OPTS)" \
-	  -e SQLMAP_DATA="$(SQLMAP_DATA)" \
-	  -v $(REPORT_DIR):/zap/reports \
-	  $(IMAGE_NAME) \
-	  /usr/local/bin/scan.sh
+run: scan ## Синоним scan (сохранён для совместимости)
 
-clean:
-	rm -rf $(REPORT_DIR)/* || true
+scan-all: build | $(REPORT_DIR) ## Всё сразу, включая ZAP full scan и sqlmap (долго)
+	$(DOCKER_RUN) -e ZAP_FULL=true -e SQLMAP=true $(IMAGE_NAME) scan.sh
+
+baseline: build | $(REPORT_DIR) ## Только пассивный скан ZAP
+	$(DOCKER_RUN) $(NONE) -e ZAP_BASELINE=true $(IMAGE_NAME) scan.sh
+
+zap-baseline: baseline ## Синоним baseline (сохранён для совместимости)
+
+full: build | $(REPORT_DIR) ## Только полный активный скан ZAP
+	$(DOCKER_RUN) $(NONE) -e ZAP_FULL=true $(IMAGE_NAME) scan.sh
+
+zap-full: full ## Синоним full (сохранён для совместимости)
+
+nikto: build | $(REPORT_DIR) ## Только Nikto
+	$(DOCKER_RUN) $(NONE) -e NIKTO=true $(IMAGE_NAME) scan.sh
+
+nmap: build | $(REPORT_DIR) ## Только Nmap
+	$(DOCKER_RUN) $(NONE) -e NMAP=true $(IMAGE_NAME) scan.sh
+
+sqlmap: build | $(REPORT_DIR) ## Только sqlmap
+	$(DOCKER_RUN) $(NONE) -e SQLMAP=true $(IMAGE_NAME) scan.sh
+
+# --- Проверка --------------------------------------------------------------
+
+lint: ## Проверить shell-скрипты и Dockerfile линтерами
+	docker run --rm -v $(CURDIR):/mnt:ro -w /mnt koalaman/shellcheck-alpine:stable \
+	  shellcheck scan.sh entrypoint.sh test_scan.sh
+	docker run --rm -i hadolint/hadolint < Dockerfile
+
+test: ## Прогнать проверки scan.sh на заглушках инструментов
+	./test_scan.sh
+
+check: lint test ## lint + test
+
+# --- Обслуживание ----------------------------------------------------------
+
+shell: build ## Открыть shell внутри контейнера
+	@mkdir -p $(REPORT_DIR)
+	$(DOCKER_RUN) --name $(CONTAINER_NAME)-shell $(IMAGE_NAME) bash
+
+clean: ## Удалить содержимое каталога отчётов
+	rm -rf $(REPORT_DIR)/*
